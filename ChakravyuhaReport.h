@@ -2,6 +2,7 @@
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/JSON.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Triple.h"
 #include <ctime>
@@ -115,7 +116,6 @@ inline uint64_t getModuleIRSize(llvm::Module &M) {
   std::string str;
   llvm::raw_string_ostream os(str);
   M.print(os, nullptr);
-  os.flush(); // Ensure all data is written to the string
   return str.size();
 }
 
@@ -126,81 +126,69 @@ inline void emitReportJSON(llvm::Module &M) {
   // Calculate final IR size at the last possible moment.
   R.obfuscatedIRSize = getModuleIRSize(M);
 
-  // --- Percentage Change Calculations ---
+  // Percentage change calculations
   double strChangePct = 0.0;
   if (R.originalIRStringDataSize != 0) {
-    strChangePct =
-        (double)(R.obfuscatedIRStringDataSize - R.originalIRStringDataSize) /
-        (double)R.originalIRStringDataSize * 100.0;
+    strChangePct = ((double)R.obfuscatedIRStringDataSize -
+                    (double)R.originalIRStringDataSize) /
+                   (double)R.originalIRStringDataSize * 100.0;
   }
-  std::stringstream ssString;
-  ssString << std::fixed << std::setprecision(2) << strChangePct;
 
   double totalChangePct = 0.0;
   if (R.originalIRSize != 0) {
     totalChangePct = ((double)R.obfuscatedIRSize - (double)R.originalIRSize) /
                      (double)R.originalIRSize * 100.0;
   }
-  std::stringstream ssTotal;
-  ssTotal << std::fixed << std::setprecision(2) << totalChangePct;
 
-  // --- JSON Output to stderr ---
-  llvm::errs() << "{\n";
-  llvm::errs() << "  \"inputFile\": \"" << esc(R.inputFile) << "\",\n";
-  llvm::errs() << "  \"outputFile\": \"" << esc(R.outputFile) << "\",\n";
-  llvm::errs() << "  \"timestamp\": \"" << nowUtcIso8601() << "\",\n";
-  llvm::errs() << "  \"inputParameters\": {\n";
-  llvm::errs() << "    \"obfuscationLevel\": \"" << esc(R.obfuscationLevel)
-               << "\",\n";
-  llvm::errs() << "    \"targetPlatform\": \"" << esc(R.targetPlatform)
-               << "\",\n";
-  llvm::errs() << "    \"enableStringEncryption\": "
-               << (R.enableStringEncryption ? "true" : "false") << ",\n";
-  llvm::errs() << "    \"enableControlFlowFlattening\": "
-               << (R.enableControlFlowFlattening ? "true" : "false") << ",\n";
-  llvm::errs() << "    \"enableFakeCodeInsertion\": "
-               << (R.enableFakeCodeInsertion ? "true" : "false") << "\n";
-  llvm::errs() << "  },\n";
-  llvm::errs() << "  \"outputAttributes\": {\n";
-  llvm::errs() << "    \"originalIRSize\": \"" << R.originalIRSize
-               << " bytes\",\n";
-  llvm::errs() << "    \"obfuscatedIRSize\": \"" << R.obfuscatedIRSize
-               << " bytes\",\n";
-  llvm::errs() << "    \"totalIRSizeChange\": \"" << ssTotal.str() << "%\",\n";
-  llvm::errs() << "    \"originalIRStringDataSize\": \""
-               << R.originalIRStringDataSize << " bytes\",\n";
-  llvm::errs() << "    \"obfuscatedIRStringDataSize\": \""
-               << R.obfuscatedIRStringDataSize << " bytes\",\n";
-  llvm::errs() << "    \"stringDataSizeChange\": \"" << ssString.str()
-               << "%\"\n";
-  llvm::errs() << "  },\n";
-  llvm::errs() << "  \"obfuscationMetrics\": {\n";
-  llvm::errs() << "    \"cyclesCompleted\": " << R.cyclesCompleted << ",\n";
-  llvm::errs() << "    \"passesRun\": [";
-  for (size_t i = 0; i < R.passesRun.size(); ++i) {
-    llvm::errs() << "\"" << esc(R.passesRun[i]) << "\"";
-    if (i + 1 < R.passesRun.size())
-      llvm::errs() << ", ";
+  std::string strChangeStr = llvm::formatv("{0:F2}%", strChangePct);
+  std::string totalChangeStr = llvm::formatv("{0:F2}%", totalChangePct);
+
+  // Build JSON Tree
+  llvm::json::Object root;
+
+  root["inputFile"] = R.inputFile;
+  root["outputFile"] = R.outputFile;
+  root["timestamp"] = nowUtcIso8601();
+
+  root["inputParameters"] = llvm::json::Object{
+      {"obfuscationLevel", R.obfuscationLevel},
+      {"targetPlatform", R.targetPlatform},
+      {"enableStringEncryption", R.enableStringEncryption},
+      {"enableControlFlowFlattening", R.enableControlFlowFlattening},
+      {"enableFakeCodeInsertion", R.enableFakeCodeInsertion}};
+
+  root["outputAttributes"] = llvm::json::Object{
+      {"originalIRSize", llvm::formatv("{0} bytes", R.originalIRSize)},
+      {"obfuscatedIRSize", llvm::formatv("{0} bytes", R.obfuscatedIRSize)},
+      {"totalIRSizeChange", totalChangeStr},
+      {"originalIRStringDataSize",
+       llvm::formatv("{0} bytes", R.originalIRStringDataSize)},
+      {"obfuscatedIRStringDataSize",
+       llvm::formatv("{0} bytes", R.obfuscatedIRStringDataSize)},
+      {"stringDataSizeChange", strChangeStr}};
+
+  llvm::json::Array passesRunArr;
+  for (const auto &pass : R.passesRun) {
+    passesRunArr.push_back(pass);
   }
-  llvm::errs() << "],\n";
-  llvm::errs() << "    \"stringEncryption\": {\n";
-  llvm::errs() << "      \"count\": " << R.stringsEncrypted << ",\n";
-  llvm::errs() << "      \"method\": \""
-               << esc(R.stringMethod.empty() ? "N/A" : R.stringMethod)
-               << "\"\n";
-  llvm::errs() << "    },\n";
-  llvm::errs() << "    \"controlFlowFlattening\": {\n";
-  llvm::errs() << "      \"flattenedFunctions\": " << R.flattenedFunctions
-               << ",\n";
-  llvm::errs() << "      \"flattenedBlocks\": " << R.flattenedBlocks << ",\n";
-  llvm::errs() << "      \"skippedFunctions\": " << R.skippedFunctions << "\n";
-  llvm::errs() << "    },\n";
-  llvm::errs() << "    \"fakeCodeInsertion\": {\n";
-  llvm::errs() << "      \"insertedBlocks\": " << R.fakeCodeBlocksInserted
+
+  root["obfuscationMetrics"] = llvm::json::Object{
+      {"cyclesCompleted", R.cyclesCompleted},
+      {"passesRun", std::move(passesRunArr)},
+      {"stringEncryption",
+       llvm::json::Object{
+           {"count", R.stringsEncrypted},
+           {"method", R.stringMethod.empty() ? "N/A" : R.stringMethod}}},
+      {"controlFlowFlattening",
+       llvm::json::Object{{"flattenedFunctions", R.flattenedFunctions},
+                          {"flattenedBlocks", R.flattenedBlocks},
+                          {"skippedFunctions", R.skippedFunctions}}},
+      {"fakeCodeInsertion",
+       llvm::json::Object{{"insertedBlocks", R.fakeCodeBlocksInserted}}}};
+
+  // {0:2} formats json with a 2-space indentation
+  llvm::errs() << llvm::formatv("{0:2}", llvm::json::Value(std::move(root)))
                << "\n";
-  llvm::errs() << "    }\n";
-  llvm::errs() << "  }\n";
-  llvm::errs() << "}\n";
 }
 
 } // namespace chakravyuha
